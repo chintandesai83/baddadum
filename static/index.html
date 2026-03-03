@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LinkedIn Job Matcher</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────────────────── -->
+<header>
+  <div class="logo">🔗 Job Matcher</div>
+  <span class="tagline">AI-powered job search from your profile or resume</span>
+</header>
+
+<!-- ── Step progress bar ───────────────────────────────────────────── -->
+<div class="step-bar">
+  <div class="step active" id="step-1">
+    <div class="step-circle">1</div>
+    <div class="step-label">Your Profile</div>
+  </div>
+  <div class="step" id="step-2">
+    <div class="step-circle">2</div>
+    <div class="step-label">Review</div>
+  </div>
+  <div class="step" id="step-3">
+    <div class="step-circle">3</div>
+    <div class="step-label">Preferences</div>
+  </div>
+  <div class="step" id="step-4">
+    <div class="step-circle">4</div>
+    <div class="step-label">Results</div>
+  </div>
+</div>
+
+<!-- ── Global error banner ─────────────────────────────────────────── -->
+<div id="global-error" class="alert alert-error hidden" style="max-width:820px;margin:1rem auto 0;padding:0 1.5rem"></div>
+
+<main>
+
+  <!-- ================================================================
+       Screen 1 – Profile Input
+       ================================================================ -->
+  <div id="screen-1" class="screen">
+    <div class="card">
+      <div class="card-title">Upload your resume or LinkedIn profile</div>
+      <div class="card-subtitle">
+        We'll extract your skills, experience, and education — then find the best matching jobs for you.
+      </div>
+
+      <!-- Tabs -->
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="file">📄 File (PDF / DOCX)</button>
+        <button class="tab-btn" data-tab="url">🔗 LinkedIn URL</button>
+        <button class="tab-btn" data-tab="text">📋 Paste Text</button>
+      </div>
+
+      <!-- Tab: File upload -->
+      <div id="tab-file" class="tab-panel active">
+        <div id="drop-zone" class="drop-zone" role="button" aria-label="Upload resume">
+          <div class="drop-zone-icon">📤</div>
+          <div class="drop-zone-text">
+            <strong>Click to upload</strong> or drag &amp; drop your resume<br>
+            <span>PDF, DOCX, or TXT — up to 10 MB</span>
+          </div>
+          <input type="file" id="file-input" accept=".pdf,.docx,.txt" />
+        </div>
+        <div id="file-preview" class="file-preview hidden">
+          <span>📎</span>
+          <span class="file-name" id="file-name"></span>
+          <button onclick="clearFile()" aria-label="Remove file">✕</button>
+        </div>
+        <div id="file-error" class="alert alert-error hidden" style="margin-top:0.75rem"></div>
+      </div>
+
+      <!-- Tab: LinkedIn URL -->
+      <div id="tab-url" class="tab-panel">
+        <div class="alert alert-info" style="margin-bottom:1rem">
+          ℹ️ LinkedIn restricts automated access and usually requires login.
+          For best results, download your profile as PDF (LinkedIn → Me → View Profile → More → <strong>Save to PDF</strong>) and upload it above.
+        </div>
+        <div class="form-group">
+          <label for="linkedin-url">LinkedIn profile URL</label>
+          <input type="url" id="linkedin-url" placeholder="https://www.linkedin.com/in/your-username" />
+          <div id="url-error" class="alert alert-error hidden" style="margin-top:0.5rem"></div>
+        </div>
+      </div>
+
+      <!-- Tab: Paste text -->
+      <div id="tab-text" class="tab-panel">
+        <div class="form-group">
+          <label for="profile-text">Paste your profile or resume text</label>
+          <textarea id="profile-text" placeholder="Paste your resume text, LinkedIn About section, or any professional bio here…"></textarea>
+          <div id="text-error" class="alert alert-error hidden" style="margin-top:0.5rem"></div>
+        </div>
+      </div>
+
+      <div class="btn-group">
+        <button class="btn btn-primary" id="btn-analyze">
+          Extract &amp; Analyse →
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================================================================
+       Screen 2 – Loading
+       ================================================================ -->
+  <div id="screen-2" class="screen hidden">
+    <div class="card">
+      <div class="loading-overlay">
+        <div class="spinner"></div>
+        <div class="loading-msg" id="loading-msg">Processing your profile…</div>
+        <p class="text-muted">This usually takes 10–20 seconds.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================================================================
+       Screen 3 – Profile Review
+       ================================================================ -->
+  <div id="screen-3" class="screen hidden">
+    <div class="card">
+      <div class="card-title">Your extracted profile</div>
+      <div class="card-subtitle">Review the details we found. Then set your job preferences below.</div>
+
+      <div class="profile-header">
+        <div class="profile-avatar" id="avatar-initials">?</div>
+        <div>
+          <div class="profile-name" id="profile-name"></div>
+          <div class="profile-title" id="profile-title"></div>
+          <div class="profile-exp"  id="profile-exp"></div>
+        </div>
+      </div>
+
+      <p id="profile-summary" style="font-size:0.9rem;color:var(--text-muted);margin-bottom:1rem;line-height:1.6"></p>
+
+      <div class="section-label">Skills</div>
+      <div class="skill-list" id="profile-skills"></div>
+
+      <div class="section-label">Experience</div>
+      <div id="profile-experience"></div>
+
+      <div class="section-label">Education</div>
+      <div id="profile-education"></div>
+
+      <div class="btn-group">
+        <button class="btn btn-ghost" id="btn-back-to-input">← Back</button>
+        <button class="btn btn-primary" onclick="renderStep(4)">Set Preferences →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================================================================
+       Screen 4 – Preferences
+       ================================================================ -->
+  <div id="screen-4" class="screen hidden">
+    <div class="card">
+      <div class="card-title">Job preferences</div>
+      <div class="card-subtitle">Tell us where you want to work and what type of roles you're looking for.</div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label for="city">City / Region <span class="text-muted">(optional)</span></label>
+          <input type="text" id="city" placeholder="e.g. New York, London, Remote" />
+        </div>
+        <div class="form-group">
+          <label for="country">Country <span class="text-muted">(optional)</span></label>
+          <input type="text" id="country" placeholder="e.g. US, UK, Germany" />
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Work arrangement</label>
+        <div class="radio-pills">
+          <div class="radio-pill">
+            <input type="radio" name="job-type" id="type-any" value="any" checked />
+            <label for="type-any">🌐 Any</label>
+          </div>
+          <div class="radio-pill">
+            <input type="radio" name="job-type" id="type-remote" value="remote" />
+            <label for="type-remote">🏠 Remote</label>
+          </div>
+          <div class="radio-pill">
+            <input type="radio" name="job-type" id="type-hybrid" value="hybrid" />
+            <label for="type-hybrid">🔀 Hybrid</label>
+          </div>
+          <div class="radio-pill">
+            <input type="radio" name="job-type" id="type-onsite" value="onsite" />
+            <label for="type-onsite">🏢 On-site</label>
+          </div>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Preferred job titles <span class="text-muted">(press Enter or comma to add)</span></label>
+        <div class="tags-input-wrapper" id="tags-wrapper">
+          <input type="text" id="tags-input" placeholder="e.g. Senior Backend Engineer" autocomplete="off" />
+        </div>
+        <div class="text-muted" style="margin-top:0.35rem;font-size:0.78rem">
+          We pre-filled suggestions from your profile. Edit freely.
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label for="extra-prefs">Anything else? <span class="text-muted">(optional)</span></label>
+        <textarea id="extra-prefs" rows="3"
+          placeholder="e.g. Prefer startups, healthcare industry, senior-level roles, salary above $120k…"></textarea>
+      </div>
+
+      <div class="btn-group">
+        <button class="btn btn-ghost" onclick="renderStep(3)">← Back</button>
+        <button class="btn btn-primary" id="btn-search">Find My Top 10 Jobs 🔍</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================================================================
+       Screen 5 – Results
+       ================================================================ -->
+  <div id="screen-5" class="screen hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;flex-wrap:wrap;gap:0.5rem">
+      <h2 class="results-title" id="results-header">Top 10 Matches</h2>
+      <div style="display:flex;gap:0.5rem">
+        <button class="btn btn-outline" id="btn-back-to-prefs">← Refine</button>
+        <button class="btn btn-ghost" id="btn-new-search">New Search</button>
+      </div>
+    </div>
+
+    <div id="jobs-container"></div>
+  </div>
+
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
