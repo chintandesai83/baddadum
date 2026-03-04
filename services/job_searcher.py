@@ -1,9 +1,29 @@
 import asyncio
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import httpx
+
+
+# Maps common country name / code variants to the ISO 3166-1 alpha-2 codes
+# that Adzuna accepts in its URL path.
+ADZUNA_COUNTRY_CODES: Dict[str, str] = {
+    # English name → code
+    "australia": "au", "austria": "at", "brazil": "br", "canada": "ca",
+    "france": "fr", "germany": "de", "india": "in", "italy": "it",
+    "netherlands": "nl", "new zealand": "nz", "poland": "pl", "russia": "ru",
+    "singapore": "sg", "south africa": "za", "spain": "es",
+    "united kingdom": "gb", "united states": "us",
+    # ISO alpha-2 pass-through
+    "au": "au", "at": "at", "br": "br", "ca": "ca", "de": "de", "fr": "fr",
+    "gb": "gb", "in": "in", "it": "it", "nl": "nl", "nz": "nz", "pl": "pl",
+    "ru": "ru", "sg": "sg", "us": "us", "za": "za", "es": "es",
+    # Common aliases
+    "usa": "us", "uk": "gb", "britain": "gb", "england": "gb",
+    "deutschland": "de", "españa": "es", "brasil": "br", "holland": "nl",
+    "america": "us",
+}
 
 
 class JobSearcher:
@@ -12,7 +32,8 @@ class JobSearcher:
     common schema.
 
     Free sources (no API key needed):
-      - Remotive.io   – remote-only jobs
+      - Remotive.io   – remote-only jobs (skipped when a specific city is given
+                        or job_type is onsite/hybrid, as it has no location API)
       - Arbeitnow     – EU-focused + remote
 
     Optional sources (require API keys in .env):
@@ -41,19 +62,28 @@ class JobSearcher:
         Fan out searches across all available sources and deduplicate by URL.
         Returns a flat list of normalised job dicts.
         """
+        city = location.strip()
+
+        # Remotive has NO location API and is remote-only.
+        # Include it only when the user is explicitly seeking remote work,
+        # or when they haven't specified a city (broad search with job_type=any).
+        include_remotive = job_type == "remote" or (job_type == "any" and not city)
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             tasks = []
             for query in queries[:3]:  # cap at 3 queries to keep latency low
-                tasks.append(self._search_remotive(client, query, limit_per_source))
+                if include_remotive:
+                    tasks.append(self._search_remotive(client, query, limit_per_source))
                 tasks.append(
-                    self._search_arbeitnow(client, query, location, limit_per_source)
+                    self._search_arbeitnow(client, query, city, country, job_type, limit_per_source)
                 )
                 if self.rapidapi_key:
-                    loc_query = f"{query} {location}".strip() if location else query
-                    tasks.append(self._search_jsearch(client, loc_query, country, limit_per_source))
+                    tasks.append(
+                        self._search_jsearch(client, query, city, country, job_type, limit_per_source)
+                    )
                 if self.adzuna_app_id and self.adzuna_api_key:
                     tasks.append(
-                        self._search_adzuna(client, query, country or "us", limit_per_source)
+                        self._search_adzuna(client, query, city, country, limit_per_source)
                     )
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -69,11 +99,9 @@ class JobSearcher:
                         seen_urls.add(url)
                         all_jobs.append(job)
 
-        # Apply work-arrangement filter
+        # Hard-filter by work arrangement — no silent fallback.
         if job_type != "any":
-            filtered = [j for j in all_jobs if j.get("job_type") == job_type]
-            # Fall back to unfiltered if too few results
-            all_jobs = filtered if len(filtered) >= 5 else all_jobs
+            all_jobs = [j for j in all_jobs if j.get("job_type") == job_type]
 
         return all_jobs
 
@@ -119,13 +147,20 @@ class JobSearcher:
         self,
         client: httpx.AsyncClient,
         query: str,
-        location: str,
+        city: str,
+        country: str,
+        job_type: str,
         limit: int,
     ) -> List[Dict[str, Any]]:
         try:
             params: Dict[str, Any] = {"search": query}
-            if location:
-                params["location"] = location
+            # Combine city + country so Arbeitnow's text search has the best
+            # chance of returning geographically relevant results.
+            loc_parts = [p for p in [city, country] if p]
+            if loc_parts:
+                params["location"] = ", ".join(loc_parts)
+            if job_type == "remote":
+                params["remote"] = "true"
             resp = await client.get(
                 "https://www.arbeitnow.com/api/job-board-api",
                 params=params,
@@ -161,7 +196,9 @@ class JobSearcher:
         self,
         client: httpx.AsyncClient,
         query: str,
+        city: str,
         country: str,
+        job_type: str,
         limit: int,
     ) -> List[Dict[str, Any]]:
         try:
@@ -169,9 +206,19 @@ class JobSearcher:
                 "X-RapidAPI-Key": self.rapidapi_key,
                 "X-RapidAPI-Host": "jsearch.p.rapidapi.com",
             }
-            params: Dict[str, Any] = {"query": query, "num_pages": "1", "page": "1"}
-            if country:
-                params["country"] = country
+            # Embedding location in the query string is the most reliable way
+            # to get geographically bounded results from JSearch.
+            loc_parts = [p for p in [city, country] if p]
+            loc_suffix = f" in {', '.join(loc_parts)}" if loc_parts else ""
+            full_query = f"{query}{loc_suffix}"
+
+            params: Dict[str, Any] = {"query": full_query, "num_pages": "1", "page": "1"}
+            if job_type == "remote":
+                params["remote_jobs_only"] = "true"
+            # radius (km) brings results within ~50 km of the specified city
+            if city:
+                params["radius"] = "50"
+
             resp = await client.get(
                 "https://jsearch.p.rapidapi.com/search",
                 headers=headers,
@@ -181,10 +228,10 @@ class JobSearcher:
             data = resp.json()
             jobs = []
             for j in data.get("data", [])[:limit]:
-                job_type = self._infer_job_type(j)
-                city = j.get("job_city", "")
-                ctry = j.get("job_country", "")
-                location = ", ".join(filter(None, [city, ctry]))
+                inferred_type = self._infer_job_type(j)
+                job_city = j.get("job_city", "")
+                job_ctry = j.get("job_country", "")
+                location = ", ".join(filter(None, [job_city, job_ctry]))
                 jobs.append(
                     {
                         "title": j.get("job_title", ""),
@@ -193,7 +240,7 @@ class JobSearcher:
                         "description": j.get("job_description", "")[:600],
                         "url": j.get("job_apply_link", ""),
                         "salary": self._format_salary(j),
-                        "job_type": job_type,
+                        "job_type": inferred_type,
                         "tags": [],
                         "posted_at": j.get("job_posted_at_datetime_utc", ""),
                         "source": "JSearch",
@@ -211,21 +258,27 @@ class JobSearcher:
         self,
         client: httpx.AsyncClient,
         query: str,
+        city: str,
         country: str,
         limit: int,
     ) -> List[Dict[str, Any]]:
         try:
-            # Adzuna uses ISO 3166-1 alpha-2 country codes (lower-case)
-            cc = (country or "us").lower()[:2]
+            cc = self._country_to_adzuna_code(country)
+            params: Dict[str, Any] = {
+                "app_id": self.adzuna_app_id,
+                "app_key": self.adzuna_api_key,
+                "what": query,
+                "results_per_page": limit,
+                "content-type": "application/json",
+            }
+            # `where` pins results to a city/region; `distance` (km) widens
+            # the search radius around that location.
+            if city:
+                params["where"] = city
+                params["distance"] = "50"
             resp = await client.get(
                 f"https://api.adzuna.com/v1/api/jobs/{cc}/search/1",
-                params={
-                    "app_id": self.adzuna_app_id,
-                    "app_key": self.adzuna_api_key,
-                    "what": query,
-                    "results_per_page": limit,
-                    "content-type": "application/json",
-                },
+                params=params,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -256,6 +309,13 @@ class JobSearcher:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _country_to_adzuna_code(country: str) -> str:
+        """Map a free-text country name or code to an Adzuna-supported ISO code."""
+        code = ADZUNA_COUNTRY_CODES.get(country.strip().lower(), "")
+        # Fall back to "us" only if the country is blank or unrecognised
+        return code or "us"
 
     @staticmethod
     def _strip_html(html: str) -> str:
