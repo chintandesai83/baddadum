@@ -9,3 +9,4 @@ requests==2.31.0
 httpx==0.25.2
 python-dotenv==1.0.0
 lxml==4.9.3
+duckduckgo-search>=6.0.0

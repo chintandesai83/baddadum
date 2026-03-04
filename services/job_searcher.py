@@ -85,6 +85,9 @@ class JobSearcher:
                     tasks.append(
                         self._search_adzuna(client, query, city, country, limit_per_source)
                     )
+                tasks.append(
+                    self._search_duckduckgo(query, city, country, job_type, limit_per_source)
+                )
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -303,6 +306,80 @@ class JobSearcher:
                     }
                 )
             return jobs
+        except Exception:
+            return []
+
+    # ------------------------------------------------------------------
+    # DuckDuckGo (no API key — finds jobs on any site)
+    # ------------------------------------------------------------------
+
+    # Job-board domains used to filter DDG results to actual job listings.
+    _JOB_DOMAINS = (
+        "linkedin.com/jobs", "linkedin.com/job",
+        "indeed.com", "glassdoor.com",
+        "lever.co", "greenhouse.io", "ashbyhq.com",
+        "jobs.workday.com", "myworkdayjobs.com",
+        "smartrecruiters.com", "jobvite.com",
+        "careers.", "/jobs/", "/careers/",
+    )
+
+    async def _search_duckduckgo(
+        self,
+        query: str,
+        city: str,
+        country: str,
+        job_type: str,
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        """Search DuckDuckGo for job postings — no API key required."""
+        try:
+            # Build a targeted query so DDG surfaces actual job postings.
+            loc_parts = [p for p in [city, country] if p]
+            loc_str = " ".join(f'"{p}"' for p in loc_parts)
+            arrangement = "remote" if job_type == "remote" else ""
+            search_q = " ".join(filter(None, [f'"{query}"', "job", arrangement, loc_str]))
+
+            # DDGS.text() is synchronous; run it off the event loop.
+            def _run() -> List[Dict[str, Any]]:
+                from duckduckgo_search import DDGS  # lazy import
+
+                raw = list(DDGS().text(search_q, max_results=limit * 2))
+                jobs: List[Dict[str, Any]] = []
+                for r in raw:
+                    url = r.get("href", "")
+                    # Only keep URLs that look like actual job listings.
+                    if not any(d in url for d in JobSearcher._JOB_DOMAINS):
+                        continue
+                    title = r.get("title", "")
+                    snippet = r.get("body", "")
+                    text_lower = (title + " " + snippet).lower()
+                    if "hybrid" in text_lower:
+                        inferred = "hybrid"
+                    elif "remote" in text_lower:
+                        inferred = "remote"
+                    else:
+                        inferred = "onsite"
+                    # Title is often "Role at Company | Board" — try to split.
+                    company = ""
+                    if " at " in title:
+                        company = title.split(" at ", 1)[1].split("|")[0].strip()
+                    jobs.append({
+                        "title": title,
+                        "company": company,
+                        "location": ", ".join(loc_parts),
+                        "description": snippet[:600],
+                        "url": url,
+                        "salary": "",
+                        "job_type": inferred,
+                        "tags": [],
+                        "posted_at": "",
+                        "source": "DuckDuckGo",
+                    })
+                    if len(jobs) >= limit:
+                        break
+                return jobs
+
+            return await asyncio.to_thread(_run)
         except Exception:
             return []
 
